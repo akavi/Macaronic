@@ -344,25 +344,22 @@ def do_blockify(f)
 end
 
 example = <<-macaron
-do_block {
-a <= do_first(1)
-b = a + 4
-c <= do_second(b)
-d = c + 4
-e <= do_third(d)
-e + 4
-}
-
-do_first(1).and_then do |a|
-b = a + 4
-do_second(b).and_then do |c|
-  d = c + 4
-  do_third(d).within do |e|
+  do_block {
+    a <= do_first(1)
+    b = a + 4
+    c <= do_second(b)
+    d = c + 4
+    e <= do_third(d)
     e + 4
+  }
+
+  do_first(1).and_then do |a|
+    b = a + 4
+    do_second(b).and_then do |c|
+      d = c + 4
+      do_third(d).within do |e|
+        e + 4
+      end
+    end
   end
-end
-end
 macaron
-
-
-
