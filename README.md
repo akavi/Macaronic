@@ -4,34 +4,46 @@ Have you ever been writing ruby and though, you know what? Ruby syntax is really
 
 Of course you have. 
 
-Well, finally there's an answer. Or, uh, will be. Real Soon. A bit of a work in progress at the moment. The aim, at least, is to provide you with runtime access to a mutable AST. Because flexible syntax can always be flexibiler
+Well, finally there's an answer. Macaronic's aim is to provide you with runtime access to a mutable AST. Because flexible syntax can always be flexibiler
 
-### Example: Haskell "Do Notation" (Not yet working)
+(NB: Only *very* basic functionality implemented. Lots of things (`if` statements, for example) aren't working yet, so, uh, bear with me)
 
-Write this:
+## Example
 
+Take a little proc that, say, prints a string
 ```
-  do_block {
-    a <= do_first(1)
-    b = a + 4
-    c <= do_second(b)
-    d = c + 4
-    e <= do_third(d)
-    e + 4
-  }
+> original = proc{ puts "hello world!" }
+ => #<Proc:0x007fcca48a0930@(irb):185> 
+> original.call
+hello world!
+ => nil 
 ```
 
-and have it converted, at runtime, to:
+Have Macaronic parse it
+```
+> original_ast = Macaronic.splode(original)
+ => {:locals=>[], :expressions=>[[:self, :puts, ["\"hello world!\""]]]} 
+> original_ast.expressions.first.arguments[1]
+ => "hello world!" 
+```
 
+Modify its AST to your heart's content and reload it
 ```
-do_first(1).and_then do |a|
-  b = a + 4
-  do_second(b).and_then do |c|
-    d = c + 4
-    do_third(d).within do |e|
-      e + 4
-    end
-  end
-end
+> original_ast.expressions.first.arguments[1] = "hello mars!"
+ => "hello mars!" 
+> modded = Macaronic.load(original_ast)
+ => #<Proc:0x007fcca5885df0@<compiled>:0> 
 ```
-(`and_then` is like Scala's `flatmap` or Haskell's `bind`. `within` is like Scala's `map` or Haskell's `>=>`)
+
+Enjoy your shiny new, run-time improved block of code
+```
+> modded.call
+hello mars!
+ => nil 
+```
+
+## FAQ
+
+1. Is this a good idea?
+
+lolno
