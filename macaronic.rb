@@ -1,17 +1,23 @@
 class Macaronic
   class Self
     def to_iseq(frame)
-      [[:putself]]
+      [[:putself], [:pop]]
+    end
+
+    def inspect
+      :self
     end
   end
 
   class Expression
     attr_accessor :method
     attr_accessor :arguments
+    attr_accessor :is_private
 
-    def initialize(method, arguments)
+    def initialize(method, arguments, is_private)
       @method = method
       @arguments = arguments
+      @is_private = is_private
     end
 
     def inspect
@@ -19,22 +25,24 @@ class Macaronic
     end
 
     def to_iseq(frame)
-      block_args, simple_args = self.arguments.partition { |a| a.is_a? Frame }
+      block_args, simple_args = self.arguments.partition { |a| a.is_a? Macaronic::Frame }
       argument_bytecode = simple_args.flat_map do  |a| 
         if a.respond_to? :to_iseq
-          a.to_iseq(frame)
+          # get rid of the default pop
+          a.to_iseq(frame)[0...-1]
         else
           [[:putobject, a]]
         end
       end
-      argument_bytecode.pop
 
       options = {
         mid: @method,
         orig_argc: simple_args.length - 1,
+        flag: 0
       }
-      options[:inst_blockptr] = block_args.first.to_iseq if block_args.any?
-      call_bytecode  = [:send, @method, options]
+      options[:blockptr] = block_args.first.to_iseq if block_args.any?
+      options[:flag] |= 8 if is_private
+      call_bytecode  = [:send, options]
 
       argument_bytecode.push call_bytecode
       argument_bytecode.push [:pop]
@@ -93,7 +101,7 @@ class Macaronic
     end
 
     def to_iseq(frame)
-      [[:getlocal, frame.depth - @scope.depth, @index]]
+      [[:getlocal, frame.depth - @scope.depth, @index], [:pop]]
     end
   end
 
@@ -125,9 +133,6 @@ class Macaronic
         optional_bound = simple_bound + [info[1].length - 1, 0].max
         splat_bound = [optional_bound, info[3]].max
         post_simple_bound = splat_bound + info[2]
-        puts "simple_bound #{simple_bound}"
-        puts "optional_bound #{optional_bound}"
-        puts "splat_bound #{splat_bound}"
         params = labels.map.with_index do |l, i|
           weird_index = labels.length + 1 - i
 
@@ -160,6 +165,7 @@ class Macaronic
         stack << 1 if inst[0] == :putobject_OP_INT2FIX_O_1_C_ 
         stack << [] if inst[0] == :newarray
         stack << inst[1] if inst[0] == :putobject
+        stack << inst[1] if inst[0] == :putstring
         stack << Self.new if inst[0] == :putself
 
         stack << self.get_local(inst[2], inst[1]) if inst[0] == :getlocal
@@ -182,7 +188,8 @@ class Macaronic
     def pop_expression(inst, stack)
       args = stack.pop(inst[:orig_argc] + 1)
       args.push Frame.new(self, inst[:blockptr]) if inst[:blockptr]
-      Expression.new inst[:mid], args
+      is_private = inst[:flag] & 8
+      Expression.new inst[:mid], args, is_private
     end
 
     def pop_assignment(depth, index, stack)
@@ -210,16 +217,16 @@ class Macaronic
         "YARVInstructionSequence/SimpleDataFormat",
         2, 1, 1,
         {
-          arg_size: self.to_iseq_arg_size,
-          local_size: self.to_iseq_local_size,
-          stack_max: self.to_iseq_stack_max,
-        },
-        "<compiled>", "<compiled>", nil, 1,
-        @type,
-        self.to_iseq_local_labels,
-        self.to_iseq_arg_format,
-        [], # TODO: catch table
-        self.to_iseq_bytecode
+        arg_size: self.to_iseq_arg_size,
+        local_size: self.to_iseq_local_size,
+        stack_max: self.to_iseq_stack_max,
+      },
+      "<compiled>", "<compiled>", nil, 1,
+      @type,
+      self.to_iseq_local_labels,
+      self.to_iseq_arg_format,
+      [], # TODO: catch table
+      self.to_iseq_bytecode
       ]
     end
 
@@ -230,12 +237,12 @@ class Macaronic
     def to_iseq_arg_format
       simple_count = self.locals.select{ |l| l.type == :simple_argument }.size
       post_count = self.locals.select{ |l| l.type == :post_argument }.size
-      splat_index = self.locals.index{ |l| l.type == :splat_argument } || 0
+      splat_index = self.locals.index{ |l| l.type == :splat_argument } || -1
       # TODO: Block args
       # TODO: Optional args
       [simple_count, [], post_count, splat_index + 1, splat_index, -1, 0]
     end
-    
+
     def to_iseq_arg_size
       self.locals.select { |l| l.type.match(/argument/) }.size
     end
@@ -268,83 +275,97 @@ class Macaronic
     def initialize(parent_scope, type, locals = nil, expressions = nil)
       return initialize_from_iseq(parent_scope, type) unless type.is_a? Symbol
 
-      @parent_scope = parent_scope
-      @type = type
-      @locals = locals
-      @locals.each { |l| l.scope = self }
-      @expressions = expressions
-      @depth = @parent_scope ? @parent_scope.depth + 1 : 0
-    end
+        @parent_scope = parent_scope
+        @type = type
+        @locals = locals
+        @locals.each { |l| l.scope = self }
+        @expressions = expressions
+        @depth = @parent_scope ? @parent_scope.depth + 1 : 0
+      end
 
-    def inspect
-      {
-        locals: @locals.map(&:inspect),
-        expressions: @expressions.map(&:inspect)
-      }
-    end
+      def inspect
+        {
+          locals: @locals.map(&:inspect),
+          expressions: @expressions.map(&:inspect)
+        }
+      end
 
-    def traverse_and_replace(&block)
-      self.expressions.each.with_index do |e, i| 
-        res = yield e
-        if res == e
-          res.traverse_and_replace(&block)
-        else
-          self.expressions[i] = res
+      def traverse_and_replace(&block)
+        self.expressions.each.with_index do |e, i| 
+          res = yield e
+          if res == e
+            res.traverse_and_replace(&block)
+          else
+            self.expressions[i] = res
+          end
+        end
+      end
+
+      def shadow(local)
+        self.traverse_and_replace do |n|
+          if n.is_a?(Macaronic::Expression) && n.receiver == :self && n.method == local.label
+            local
+          else
+            n
+          end
         end
       end
     end
 
-    def shadow(local)
-      self.traverse_and_replace do |n|
-        if n.is_a?(Macaronic::Expression) && n.receiver == :self && n.method == local.label
-          local
-        else
-          n
-        end
-      end
+    def self.splode(data)
+      data = ISeq.of(data) if data.is_a? Proc
+      data = data.to_a if data.is_a? ISeq
+
+      Frame.new(nil, data)
+    end
+
+    # TODO: Remove this once you figure out how
+    # rb_iseq_load allows passing in of enclosing scope
+    def self.wrap_with_top(iseq)
+      wrapper = ["YARVInstructionSequence/SimpleDataFormat", 2, 1, 1, {:arg_size=>0, :local_size=>1, :stack_max=>1}, "<compiled>", "<compiled>", nil, 1, :top, [], 0, [], :tbd]
+      wrapper[13] = [
+        [:putself],
+        [:send, {mid: :proc, blockptr: iseq, flag: 8, orig_argc: 0}],
+        [:leave]
+      ]
+      wrapper
+    end
+
+    def self.load(frame)
+      frame_iseq = frame.to_iseq
+      frame_iseq = self.wrap_with_top(frame_iseq) unless frame.type == :top
+      ISeq.load(frame_iseq).eval
+    end
+
+    def self.on(block)
+      frame = self.splode(block)
+      frame = yield frame
+      #self.load(frame)
     end
   end
 
-  def self.splode(data)
-    data = ISeq.of(data) if data.is_a? Proc
-    data = data.to_a if data.is_a? ISeq
-
-    Frame.new(nil, data)
+  def do_block(&block)
+    Macaronic.on(block){ |f| do_blockify(f) }
   end
 
-  def self.load(frame)
-    ISeq.load(frame.to_iseq)
+  def do_blockify(f)
+    back_assign_idxs = f.expressions.each_index.select { |i| f.expressions[i].method == :<= }
+    first_idx = back_assign_idxs[0]
+    return f unless first_idx
+    assign_line = f.expressions[first_idx]
+
+    new_block_expressions = f.expressions[(first_idx + 1)..-1]
+    f.expressions = f.expressions[0...first_idx]
+    new_block_arg = Macaronic::Local.new(nil, :simple_argument, assign_line.receiver.method)
+    new_block = Macaronic::Frame.new(f, :block, [new_block_arg], new_block_expressions)
+    new_block.shadow(new_block_arg)
+
+    if back_assign_idxs.length > 1
+      f.expressions.push(Macaronic::Expression.new(assign_line.arguments[0], :and_then, [new_block]))
+    else
+      f.expressions.push(Macaronic::Expression.new(assign_line.arguments[0], :within, [new_block]))
+    end
+
+    do_blockify(new_block)
+    f
   end
-
-  def self.on(block)
-    frame = self.splode(block)
-    frame = yield frame
-    #self.load(frame)
-  end
-end
-
-def do_block(&block)
-  Macaronic.on(block){ |f| do_blockify(f) }
-end
-
-def do_blockify(f)
-  back_assign_idxs = f.expressions.each_index.select { |i| f.expressions[i].method == :<= }
-  first_idx = back_assign_idxs[0]
-  return f unless first_idx
-  assign_line = f.expressions[first_idx]
-
-  new_block_expressions = f.expressions[(first_idx + 1)..-1]
-  f.expressions = f.expressions[0...first_idx]
-  new_block_arg = Macaronic::Local.new(nil, :simple_argument, assign_line.receiver.method)
-  new_block = Macaronic::Frame.new(f, :block, [new_block_arg], new_block_expressions)
-  new_block.shadow(new_block_arg)
-
-  if back_assign_idxs.length > 1
-    f.expressions.push(Macaronic::Expression.new(assign_line.arguments[0], :and_then, [new_block]))
-  else
-    f.expressions.push(Macaronic::Expression.new(assign_line.arguments[0], :within, [new_block]))
-  end
-
-  do_blockify(new_block)
-  f
-end
