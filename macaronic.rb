@@ -1,4 +1,46 @@
+require 'iseq'
+require 'pp'
+
 class Macaronic
+  class Literal
+    attr_accessor :value
+    def initialize(value)
+      @value = value
+    end
+
+    def to_iseq(frame)
+      [[:putobject, @value], [:pop]]
+    end
+
+    def inspect
+      @value
+    end
+
+    def traverse_and_replace(&block)
+      @value = yield @value
+    end
+  end
+
+  class ArrayLiteral < Literal
+    def to_iseq(frame)
+      codes = @value.flat_map { |val| val.to_iseq(frame)[0...-1] }
+      codes.push [:newarray, @value.size]
+      codes.push [:pop]
+      codes
+    end
+
+    def traverse_and_replace(&block)
+      self.value.each.with_index do |v, i| 
+        res = yield v
+        if res == v && v.respond_to?(:traverse_and_replace)
+          v.traverse_and_replace(&block)
+        else
+          self.value[i] = res
+        end
+      end
+    end
+  end
+
   class Self
     def to_iseq(frame)
       [[:putself], [:pop]]
@@ -14,10 +56,14 @@ class Macaronic
     attr_accessor :arguments
     attr_accessor :is_private
 
-    def initialize(method, arguments, is_private)
+    def initialize(method, arguments, is_private = false)
       @method = method
       @arguments = arguments
       @is_private = is_private
+    end
+
+    def receiver
+      @arguments.first
     end
 
     def inspect
@@ -27,12 +73,8 @@ class Macaronic
     def to_iseq(frame)
       block_args, simple_args = self.arguments.partition { |a| a.is_a? Macaronic::Frame }
       argument_bytecode = simple_args.flat_map do  |a| 
-        if a.respond_to? :to_iseq
-          # get rid of the default pop
-          a.to_iseq(frame)[0...-1]
-        else
-          [[:putobject, a]]
-        end
+        # get rid of the default pop
+        a.to_iseq(frame)[0...-1]
       end
 
       options = {
@@ -101,7 +143,15 @@ class Macaronic
     end
 
     def to_iseq(frame)
-      [[:getlocal, frame.depth - @scope.depth, @index], [:pop]]
+      search_depth = frame.depth - @scope.depth
+      if search_depth == 0
+        :getlocal_OP__WC__0
+        [[:getlocal_OP__WC__0, @index], [:pop]]
+      elsif search_depth == 1
+        [[:getlocal_OP__WC__1, @index], [:pop]]
+      else
+        [[:getlocal, frame.depth - @scope.depth, @index], [:pop]]
+      end
     end
   end
 
@@ -163,10 +213,11 @@ class Macaronic
 
         stack << 0 if inst[0] == :putobject_OP_INT2FIX_O_0_C_ 
         stack << 1 if inst[0] == :putobject_OP_INT2FIX_O_1_C_ 
-        stack << [] if inst[0] == :newarray
-        stack << inst[1] if inst[0] == :putobject
-        stack << inst[1] if inst[0] == :putstring
+        stack << Literal.new(inst[1]) if inst[0] == :putobject
+        stack << Literal.new(inst[1]) if inst[0] == :putstring
         stack << Self.new if inst[0] == :putself
+        stack << self.pop_array(inst[1], stack) if inst[0] == :newarray
+        stack << ArrayLiteral.new(inst[1].map{ |v| Literal.new(v)}) if inst[0] == :duparray
 
         stack << self.get_local(inst[2], inst[1]) if inst[0] == :getlocal
         stack << self.get_local(1, inst[1]) if inst[0] == :getlocal_OP__WC__1
@@ -197,6 +248,11 @@ class Macaronic
       value = stack.pop
       Assignment.new(local, value)
     end
+    
+    def pop_array(count, stack)
+      values = stack.pop(count)
+      ArrayLiteral.new(values)
+    end
 
     def get_local(depth, index)
       scope = self
@@ -207,7 +263,8 @@ class Macaronic
 
   module FrameToIseq
     def prep_to_iseq
-
+      local_count = self.locals.size
+      self.locals.map.with_index{ |l, i| l.index = local_count + 1 - i }
     end
 
     def to_iseq(parent_frame = nil)
@@ -275,97 +332,73 @@ class Macaronic
     def initialize(parent_scope, type, locals = nil, expressions = nil)
       return initialize_from_iseq(parent_scope, type) unless type.is_a? Symbol
 
-        @parent_scope = parent_scope
-        @type = type
-        @locals = locals
-        @locals.each { |l| l.scope = self }
-        @expressions = expressions
-        @depth = @parent_scope ? @parent_scope.depth + 1 : 0
-      end
+      @parent_scope = parent_scope
+      @type = type
+      @locals = locals
+      @locals.each { |l| l.scope = self }
+      @expressions = expressions
+      @depth = @parent_scope ? @parent_scope.depth + 1 : 0
+    end
 
-      def inspect
-        {
-          locals: @locals.map(&:inspect),
-          expressions: @expressions.map(&:inspect)
-        }
-      end
+    def inspect
+      {
+        locals: @locals.map(&:inspect),
+        expressions: @expressions.map(&:inspect)
+      }
+    end
 
-      def traverse_and_replace(&block)
-        self.expressions.each.with_index do |e, i| 
-          res = yield e
-          if res == e
-            res.traverse_and_replace(&block)
-          else
-            self.expressions[i] = res
-          end
-        end
-      end
-
-      def shadow(local)
-        self.traverse_and_replace do |n|
-          if n.is_a?(Macaronic::Expression) && n.receiver == :self && n.method == local.label
-            local
-          else
-            n
-          end
+    def traverse_and_replace(&block)
+      self.expressions.each.with_index do |e, i| 
+        res = yield e
+        if res == e
+          res.traverse_and_replace(&block)
+        else
+          self.expressions[i] = res
         end
       end
     end
 
-    def self.splode(data)
-      data = ISeq.of(data) if data.is_a? Proc
-      data = data.to_a if data.is_a? ISeq
-
-      Frame.new(nil, data)
-    end
-
-    # TODO: Remove this once you figure out how
-    # rb_iseq_load allows passing in of enclosing scope
-    def self.wrap_with_top(iseq)
-      wrapper = ["YARVInstructionSequence/SimpleDataFormat", 2, 1, 1, {:arg_size=>0, :local_size=>1, :stack_max=>1}, "<compiled>", "<compiled>", nil, 1, :top, [], 0, [], :tbd]
-      wrapper[13] = [
-        [:putself],
-        [:send, {mid: :proc, blockptr: iseq, flag: 8, orig_argc: 0}],
-        [:leave]
-      ]
-      wrapper
-    end
-
-    def self.load(frame)
-      frame_iseq = frame.to_iseq
-      frame_iseq = self.wrap_with_top(frame_iseq) unless frame.type == :top
-      ISeq.load(frame_iseq).eval
-    end
-
-    def self.on(block)
-      frame = self.splode(block)
-      frame = yield frame
-      #self.load(frame)
+    def shadow(local)
+      local.scope = self
+      self.traverse_and_replace do |n|
+        if n.is_a?(Macaronic::Expression) && n.receiver.is_a?(Macaronic::Self) && n.method == local.label
+          local
+        else
+          n
+        end
+      end
     end
   end
 
-  def do_block(&block)
-    Macaronic.on(block){ |f| do_blockify(f) }
+  def self.splode(data)
+    data = ISeq.of(data) if data.is_a? Proc
+    data = data.to_a if data.is_a? ISeq
+
+    Frame.new(nil, data)
   end
 
-  def do_blockify(f)
-    back_assign_idxs = f.expressions.each_index.select { |i| f.expressions[i].method == :<= }
-    first_idx = back_assign_idxs[0]
-    return f unless first_idx
-    assign_line = f.expressions[first_idx]
-
-    new_block_expressions = f.expressions[(first_idx + 1)..-1]
-    f.expressions = f.expressions[0...first_idx]
-    new_block_arg = Macaronic::Local.new(nil, :simple_argument, assign_line.receiver.method)
-    new_block = Macaronic::Frame.new(f, :block, [new_block_arg], new_block_expressions)
-    new_block.shadow(new_block_arg)
-
-    if back_assign_idxs.length > 1
-      f.expressions.push(Macaronic::Expression.new(assign_line.arguments[0], :and_then, [new_block]))
-    else
-      f.expressions.push(Macaronic::Expression.new(assign_line.arguments[0], :within, [new_block]))
-    end
-
-    do_blockify(new_block)
-    f
+  # TODO: Remove this once you figure out how
+  # rb_iseq_load allows passing in of enclosing scope
+  def self.wrap_with_top(iseq)
+    wrapper = ["YARVInstructionSequence/SimpleDataFormat", 2, 1, 1, {:arg_size=>0, :local_size=>1, :stack_max=>1}, "<compiled>", "<compiled>", nil, 1, :top, [], 0, [], :tbd]
+    wrapper[13] = [
+      [:putself],
+      [:send, {mid: :proc, blockptr: iseq, flag: 8, orig_argc: 0}],
+      [:leave]
+    ]
+    wrapper
   end
+
+  def self.load(frame)
+    frame_iseq = frame.to_iseq
+    frame_iseq = self.wrap_with_top(frame_iseq) unless frame.type == :top
+    pp frame_iseq
+    ISeq.load(frame_iseq)
+  end
+
+  def self.on(block)
+    frame = self.splode(block)
+    frame = yield frame
+    self.load(frame)
+  end
+end
