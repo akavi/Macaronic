@@ -1,6 +1,6 @@
 # Macaronic
 
-Have you ever been writing ruby and though, you know what? Ruby syntax is really flexible and all, but that's not enough. What I *really* need is the ability to reach down into the guts of MRI and twist the AST to my will. At runtime.
+Have you ever been writing ruby and thought, you know what? Ruby syntax is really flexible and all, but that's not enough. What I *really* need is the ability to reach down into the guts of MRI and twist the AST to my will. At runtime.
 
 Of course you have. 
 
@@ -8,7 +8,7 @@ Well, finally there's an answer. Macaronic's aim is to provide you with runtime 
 
 (NB: Only *very* basic functionality implemented. Lots of things (`if` statements, for example) aren't working yet, so, uh, bear with me)
 
-## Example
+## An example
 
 Take a little proc that, say, prints a string
 ```
@@ -41,6 +41,34 @@ Enjoy your shiny new, run-time improved block of code
 hello mars!
  => nil 
 ```
+
+## But let's get crazier
+
+(Take a look at `do_block.rb` to see the implementation of this. Use of `and_then` and `within` comes from [here](http://codon.com/refactoring-ruby-with-monads))
+
+Write this:
+```
+do_block do 
+ x <= [1, 2, 3]
+ y <= ["a", "b", "c"]
+ z <= [:foo, :bar, :baz]
+ [x, y, z]
+end
+```
+
+And have it converted before execution into this:
+```
+[1, 2, 3].and_then do |x|
+  ["a", "b", "c"].and_then do |y|
+    [:foo, :bar, :baz].within do |z|
+      [x, y, z]
+    end
+  end
+end
+```
+
+Yay, Haskell do-notation, in Ruby!
+
 
 ## FAQ
 

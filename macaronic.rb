@@ -399,6 +399,6 @@ class Macaronic
   def self.on(block)
     frame = self.splode(block)
     frame = yield frame
-    self.load(frame)
+    self.load(frame).eval
   end
 end
