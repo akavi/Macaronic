@@ -173,7 +173,20 @@ class Macaronic
     end
 
     def inspect
-      "if #{@test.inspect} then #{@if_expressions.inspect} else #{@else_expressions}"
+      "if #{@test.inspect} #{@if_expressions.inspect} else #{@else_expressions}"
+    end
+  end
+
+  class While
+    attr_accessor :test, :expressions
+
+    def initialize(test, expressions)
+      @test = test
+      @expressions = expressions
+    end
+
+    def inspect
+      "while #{@test.inspect} #{@expressions.inspect}"
     end
   end
 
@@ -247,9 +260,9 @@ class Macaronic
 
     # TODO support early return/break
     # TODO support whiles
+    # TODO use an actual parser
     def expressions_from_iseq(bytecodes, locals)
       bytecodes.reduce([]) do |stack, inst|
-        puts "STACK: #{stack}"
         puts "INST: #{inst}"
         # annoyingly, labels have have their own format
         # UGGGGLY, TODO: refactor
@@ -258,6 +271,8 @@ class Macaronic
             stack << ih
           elsif iff = self.pop_if(inst, stack)
             stack << iff 
+          else 
+            stack << Label.new(inst)
           end
 
           next stack
@@ -267,16 +282,17 @@ class Macaronic
         end
 
         case inst[0]
-        when :throw
-          # TODO
-        when :trace
-          # do nothing
-          # TODO?
+        # TODO
+        when :throw 
+        # TODO?
+        when :trace, :pop, :putnil, :leave
          
         when :branchunless
           test = stack.pop
           if_hole = IfHole.new(test, inst[1], nil, nil, nil)
           stack << if_hole
+        when :branchif
+          stack << self.pop_while(inst, stack)
         when :jump
           stack << Jump.new(inst[1])
 
@@ -355,6 +371,25 @@ class Macaronic
 
         If.new(ih.test, ih.if_expressions, else_exprs)
       end
+    end
+
+    # HACKY
+    # TODO: cleanup
+    def pop_while(label, stack)
+      test = stack.pop
+      intro_label = stack.pop
+
+      while_exprs = []
+      while (expr = stack.pop) && !(expr.is_a?(Label) && expr.name == label)
+        next if expr.is_a?(Jump)
+        next if expr.is_a?(Label)
+        while_exprs.unshift expr 
+      end
+
+      while (expr = stack.pop) && !(expr.is_a?(Jump) && expr.label == intro_label.name)
+      end
+
+      wile = While.new(test, while_exprs)
     end
 
     def pop_expression(inst, stack)

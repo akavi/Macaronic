@@ -6,7 +6,7 @@ Of course you have.
 
 Well, finally there's an answer. Macaronic's aim is to provide you with runtime access to a mutable AST. Because flexible syntax can always be flexibiler
 
-(NB: Only *very* basic functionality implemented. Lots of things (`if` statements, for example) aren't working yet, so, uh, bear with me)
+(NB: Only basic functionality implemented. Lots of things (exceptions, for example) aren't working yet, so, uh, bear with me)
 
 ## An example
 
