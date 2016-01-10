@@ -67,7 +67,8 @@ class Macaronic
     end
 
     def inspect
-      [@arguments.first.inspect, @method, @arguments[1..-1].map(&:inspect)]
+      args = @arguments[1..-1].map(&:inspect).join(", ")
+      "#{@arguments.first.inspect}.#{@method.to_s}(#{})"
     end
 
     def to_iseq(frame)
@@ -112,7 +113,7 @@ class Macaronic
     end
 
     def inspect
-      [@local.inspect, "=", @value.inspect]
+      "#{@local.inspect}=#{@value.inspect}"
     end
 
     def to_iseq(frame)
@@ -121,6 +122,13 @@ class Macaronic
       set_bytecode = [:setlocal, @local.scope.depth, @local.index]
       value_bytecodes.push set_bytecode
       value_bytecodes.push [:pop]
+    end
+  end
+
+  class Label
+    attr_accessor :name
+    def initialize(name)
+      @name = name
     end
   end
 
@@ -155,7 +163,43 @@ class Macaronic
     end
   end
 
+  class If
+    attr_accessor :test, :if_expressions, :else_expressions
+
+    def initialize(test, if_expressions, else_expressions)
+      @test = test
+      @if_expressions = if_expressions
+      @else_expressions = else_expressions
+    end
+
+    def inspect
+      "if #{@test.inspect} then #{@if_expressions.inspect} else #{@else_expressions}"
+    end
+  end
+
   module FrameFromIseq
+    class IfHole
+      attr_accessor :test, :else_label, :if_label, :if_expressions, :else_expressions
+      def initialize(test, if_label, if_expressions, else_label, else_expressions)
+        @test = test
+        @if_label = if_label
+        @if_expressions = if_expressions
+        @else_label = else_label
+        @else_expressions = else_expressions
+      end
+    end
+
+    class Jump
+      attr_accessor :label
+      def initialize(label)
+        @label = label
+      end
+
+      def inspect
+        "jump to #{@label}"
+      end
+    end
+
     def initialize_from_iseq(parent_scope, iseq)
       @parent_scope = parent_scope
       @type = iseq[9]
@@ -201,39 +245,116 @@ class Macaronic
       end
     end
 
+    # TODO support early return/break
+    # TODO support whiles
     def expressions_from_iseq(bytecodes, locals)
-      expressions = []
-      stack = []
-      bytecodes.each do |inst|
-        next unless inst.is_a? Array
-        next if inst[0] == :trace
-        # TODO: support ifs/whiles
-        next if inst[0] == :jump
-        #stack << stack.last if inst[0] == :dup
+      bytecodes.reduce([]) do |stack, inst|
+        puts "STACK: #{stack}"
+        puts "INST: #{inst}"
+        # annoyingly, labels have have their own format
+        # UGGGGLY, TODO: refactor
+        if inst.is_a?(Symbol) && inst.to_s =~ /^label/
+          if ih = self.half_pop_if(inst, stack)
+            stack << ih
+          elsif iff = self.pop_if(inst, stack)
+            stack << iff 
+          end
 
-        stack << 0 if inst[0] == :putobject_OP_INT2FIX_O_0_C_ 
-        stack << 1 if inst[0] == :putobject_OP_INT2FIX_O_1_C_ 
-        stack << Literal.new(inst[1]) if inst[0] == :putobject
-        stack << Literal.new(inst[1]) if inst[0] == :putstring
-        stack << Self.new if inst[0] == :putself
-        stack << self.pop_array(inst[1], stack) if inst[0] == :newarray
-        stack << ArrayLiteral.new(inst[1].map{ |v| Literal.new(v)}) if inst[0] == :duparray
+          next stack
+        elsif inst.is_a?(Fixnum)
+          # TODO: What's with the plain numbers?
+          next stack
+        end
 
-        stack << self.get_local(inst[2], inst[1]) if inst[0] == :getlocal
-        stack << self.get_local(1, inst[1]) if inst[0] == :getlocal_OP__WC__1
-        stack << self.get_local(0, inst[1]) if inst[0] == :getlocal_OP__WC__0
+        case inst[0]
+        when :throw
+          # TODO
+        when :trace
+          # do nothing
+          # TODO?
+         
+        when :branchunless
+          test = stack.pop
+          if_hole = IfHole.new(test, inst[1], nil, nil, nil)
+          stack << if_hole
+        when :jump
+          stack << Jump.new(inst[1])
 
-        stack << self.pop_assignment(inst[2], inst[1], stack) if inst[0] == :setlocal
-        stack << self.pop_assignment(1, inst[1], stack) if inst[0] == :setlocal_OP__WC__1
-        stack << self.pop_assignment(0, inst[1], stack) if inst[0] == :setlocal_OP__WC__0
+        when :putobject_OP_INT2FIX_O_0_C_ 
+          stack << Literal.new(0)
+        when :putobject_OP_INT2FIX_O_1_C_ 
+          stack << Literal.new(1)
+        when :putobject
+          stack << Literal.new(inst[1])
+        when :putstring
+          stack << Literal.new(inst[1])
+        when :putself
+          stack << Self.new
+        when :newarray
+          stack << self.pop_array(inst[1], stack)
+        when :duparrray
+          stack << ArrayLiteral.new(inst[1].map{ |v| Literal.new(v)})
 
-        stack << self.pop_expression(inst[1], stack) if inst[0] == :send
-        stack << self.pop_expression(inst[1], stack) if inst[0] == :opt_send_simple
-        stack << self.pop_expression(inst[1], stack) if inst[0] == :opt_le
-        stack << self.pop_expression(inst[1], stack) if inst[0] == :opt_plus
+        when :getlocal
+          stack << self.get_local(inst[2], inst[1])
+        when :getlocal_OP__WC__1
+          stack << self.get_local(1, inst[1])
+        when :getlocal_OP__WC__0
+          stack << self.get_local(0, inst[1])
+
+        when :setlocal
+          stack << self.pop_assignment(inst[2], inst[1], stack)
+        when :setlocal_OP__WC__1
+          stack << self.pop_assignment(1, inst[1], stack)
+        when :setlocal_OP__WC__0
+          stack << self.pop_assignment(0, inst[1], stack)
+
+        when :send
+          stack << self.pop_expression(inst[1], stack)
+        when :opt_send_simple
+          stack << self.pop_expression(inst[1], stack)
+        when :opt_lt
+          stack << self.pop_expression(inst[1], stack)
+        when :opt_le
+          stack << self.pop_expression(inst[1], stack)
+        when :opt_plus
+          stack << self.pop_expression(inst[1], stack)
+        # TODO: The other opts and sends
+        else
+          puts "UNKNOWN"
+        end
+
+        stack
       end
+    end
 
-      stack
+    def half_pop_if(label, stack)
+      if ih = stack.find{ |exp| exp.is_a?(IfHole) && exp.if_label == label }
+        ih.else_label = stack.pop.label
+
+        if_exprs = []
+        while (expr = stack.pop) != ih
+          if_exprs.unshift expr 
+        end
+        ih.if_expressions =  if_exprs
+
+        ih
+      end
+    end
+
+    def pop_if(label, stack)
+      if ih = stack.find{ |exp| exp.is_a?(IfHole) && exp.else_label == label }
+        if child_if = self.pop_if(label, ih.if_expressions)
+          ih.if_expressions << child_if
+        end
+
+        else_exprs = []
+        while (expr = stack.pop) != ih
+          else_exprs.unshift expr 
+        end
+
+        If.new(ih.test, ih.if_expressions, else_exprs)
+      end
     end
 
     def pop_expression(inst, stack)
@@ -308,6 +429,7 @@ class Macaronic
       self.locals.size + 1
     end
 
+    # TODO: Figure out what this does?
     def to_iseq_stack_max
       10
     end
@@ -392,7 +514,6 @@ class Macaronic
   def self.load(frame)
     frame_iseq = frame.to_iseq
     frame_iseq = self.wrap_with_top(frame_iseq) unless frame.type == :top
-    pp frame_iseq
     ISeq.load(frame_iseq)
   end
 
